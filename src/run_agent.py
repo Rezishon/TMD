@@ -32,7 +32,7 @@ ai_client = OpenAI(
 
 CACHE_FILE = "daily_cache.txt"
 EMAIL_HOUR = 8
-FETCH_MINUTES = 60
+FETCH_MINUTES = 75
 TEST_MODE = True
 MODEL_NAME = "openrouter/free"
 # ======================================================
