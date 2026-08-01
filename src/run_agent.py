@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sys
 import logging
 import traceback
 from datetime import datetime
@@ -49,9 +50,7 @@ async def run_daily_digest():
             os.remove(CACHE_FILE)
             logger.info("🗑️ TEST_MODE active: Cleared old cache before starting.")
 
-        transport = StdioTransport(
-            command="uv", args=["run", "python", "-m", "src.server"]
-        )
+        transport = StdioTransport(command=sys.executable, args=["-m", "src.server"])
 
         async with Client(transport) as mcp_client:
             # ==========================================
