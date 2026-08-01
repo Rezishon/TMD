@@ -1,0 +1,11 @@
+[project]
+name = "telegram-mcp-agent"
+version = "0.1.0"
+description = "MCP server for reading Telegram channels and emailing reports."
+requires-python = ">=3.10"
+dependencies = [
+    "fastmcp>=3.0",
+    "telethon>=1.36.0",
+    "pydantic-settings>=2.7.0",
+    "openai>=1.50.0"
+]
