@@ -3,7 +3,7 @@ import os
 import sys
 import logging
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastmcp import Client
 from fastmcp.client.transports import StdioTransport
 from openai import OpenAI
@@ -24,24 +24,54 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ======================================================
-# CONFIGURATION / TESTING SETTINGS
+# CONFIGURATION SETTINGS
 # ======================================================
 ai_client = OpenAI(
     api_key=settings.openrouter_api_key, base_url="https://openrouter.ai/api/v1"
 )
 
 CACHE_FILE = "daily_cache.txt"
+LAST_RUN_FILE = "last_run.txt"  # NEW: Tracks the last successful execution
 EMAIL_HOUR = 8
-FETCH_MINUTES = 75
-TEST_MODE = True
+TEST_MODE = False
 MODEL_NAME = "openrouter/free"
+MAX_CATCHUP_MINUTES = 1440  # Don't try to fetch more than 24 hours at once
 # ======================================================
+
+
+def get_dynamic_fetch_minutes(now: datetime) -> int:
+    """Calculates how many minutes to fetch based on the last successful run."""
+    if os.path.exists(LAST_RUN_FILE):
+        try:
+            with open(LAST_RUN_FILE, "r") as f:
+                last_run_str = f.read().strip()
+                last_run_time = datetime.fromisoformat(last_run_str)
+
+            # Calculate difference in minutes + a 5-minute safety overlap
+            delta_minutes = int((now - last_run_time).total_seconds() / 60) + 5
+
+            # Cap at 24 hours so we don't blow up the AI context window
+            fetch_mins = min(delta_minutes, MAX_CATCHUP_MINUTES)
+            logger.info(
+                f"⏱️ Found last run at {last_run_time.strftime('%H:%M')}. Auto-fetching {fetch_mins} minutes."
+            )
+            return fetch_mins
+        except Exception as e:
+            logger.warning(
+                f"⚠️ Could not read last_run.txt ({e}). Defaulting to 65 mins."
+            )
+            return 65
+    else:
+        logger.info("🆕 No last_run.txt found. Defaulting to 65 mins.")
+        return 65
 
 
 async def run_daily_digest():
     now = datetime.now()
+    fetch_minutes = get_dynamic_fetch_minutes(now)
+
     logger.info(
-        f"🤖 Agent waking up at {now.strftime('%H:%M:%S')} (TEST_MODE={TEST_MODE}, FETCH_MINUTES={FETCH_MINUTES})..."
+        f"🤖 Agent waking up at {now.strftime('%H:%M:%S')} (TEST_MODE={TEST_MODE}, FETCH_MINUTES={fetch_minutes})..."
     )
 
     try:
@@ -54,7 +84,7 @@ async def run_daily_digest():
 
         async with Client(transport) as mcp_client:
             # ==========================================
-            # STEP 1: FETCH ONLY THE LAST X MINUTES
+            # STEP 1: FETCH DYNAMIC WINDOW
             # ==========================================
             channels = [
                 c.strip() for c in settings.target_channels.split(",") if c.strip()
@@ -63,29 +93,29 @@ async def run_daily_digest():
 
             for channel in channels:
                 logger.info(
-                    f"📥 Fetching updates for {channel} (last {FETCH_MINUTES} mins)..."
+                    f"📥 Fetching updates for {channel} (last {fetch_minutes} mins)..."
                 )
                 messages_result = await mcp_client.call_tool(
                     "fetch_channel_updates",
-                    {"channel_username": channel, "minutes": FETCH_MINUTES},
+                    {"channel_username": channel, "minutes": fetch_minutes},
                 )
                 raw_text = str(messages_result)
                 if "No text messages found" not in raw_text and "Error" not in raw_text:
                     recent_texts.append(f"=== {channel} ===\n{raw_text}")
                 else:
                     logger.info(
-                        f"Skipping {channel}: No messages in last {FETCH_MINUTES} mins."
+                        f"Skipping {channel}: No messages in last {fetch_minutes} mins."
                     )
 
             # ==========================================
-            # STEP 2: HOURLY DIGEST (MAP) & SAVE
+            # STEP 2: HOURLY DIGEST & SAVE
             # ==========================================
             if recent_texts:
                 logger.info("🧠 Creating hourly mini-digest...")
                 combined_hourly = "\n\n".join(recent_texts)
 
                 hourly_prompt = f"""
-                Briefly summarize these Telegram messages from the last hour. 
+                Briefly summarize these Telegram messages. 
                 Discard spam, ads, and junk. KEEP the [ID: link] and [media attach] tags intact so the daily summarizer has them.
                 
                 MESSAGES:
@@ -104,8 +134,12 @@ async def run_daily_digest():
             else:
                 logger.info("💤 No new messages in this interval.")
 
+            # ✅ SUCCESS! Write the timestamp so the next run knows when we finished.
+            with open(LAST_RUN_FILE, "w") as f:
+                f.write(now.isoformat())
+
             # ==========================================
-            # STEP 3: AT 8 AM, DO THE MASTER DIGEST (REDUCE)
+            # STEP 3: AT 8 AM, DO THE MASTER DIGEST
             # ==========================================
             should_send = TEST_MODE or (now.hour == EMAIL_HOUR)
 
@@ -236,15 +270,11 @@ async def run_daily_digest():
                     )
 
     except Exception as e:
-        # ==========================================
-        # CRITICAL ERROR HANDLER
-        # ==========================================
         error_details = traceback.format_exc()
         logger.error(f"❌ CRITICAL AGENT CRASH:\n{error_details}")
 
         if not TEST_MODE:
             logger.info("⚠️ Sending emergency error email via direct fallback...")
-
             error_html = f"""
             <html>
                 <body style="font-family: monospace; background-color: #ffe6e6; padding: 20px;">
@@ -256,11 +286,9 @@ async def run_daily_digest():
                 </body>
             </html>
             """
-
             success, msg = EmailService.send_report(
                 subject="🚨 Agent Crash Alert", content=error_html
             )
-
             if success:
                 logger.info("✅ Error email sent successfully.")
             else:
