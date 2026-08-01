@@ -32,7 +32,7 @@ Before running this project, you will need:
 **1. Clone the repository and install dependencies:**
 
 ```bash
-git clone https://github.com/yourusername/TMD.git
+git clone https://github.com/Rezishon/TMD.git
 cd TMD
 uv sync
 ```
