@@ -128,10 +128,21 @@ async def run_daily_digest():
                     messages=[{"role": "user", "content": hourly_prompt}],
                 )
 
-                with open(CACHE_FILE, "a", encoding="utf-8") as f:
-                    f.write(f"\n\n--- HOUR: {now.strftime('%H:%M')} ---\n")
-                    f.write(hourly_res.choices[0].message.content)
-                logger.info("✅ Hourly digest saved to cache.")
+                if (
+                    hourly_res.choices
+                    and len(hourly_res.choices) > 0
+                    and hourly_res.choices[0].message
+                    and hourly_res.choices[0].message.content
+                ):
+                    content = hourly_res.choices[0].message.content
+                    with open(CACHE_FILE, "a", encoding="utf-8") as f:
+                        f.write(f"\n\n--- HOUR: {now.strftime('%H:%M')} ---\n")
+                        f.write(content)
+                    logger.info("✅ Hourly digest saved to cache.")
+                else:
+                    logger.warning(
+                        "⚠️ OpenRouter returned 200 OK, but choices/content was empty. Skipping cache for this run."
+                    )
             else:
                 logger.info("💤 No new messages in this interval.")
 
