@@ -31,11 +31,11 @@ ai_client = OpenAI(
 )
 
 CACHE_FILE = "daily_cache.txt"
-LAST_RUN_FILE = "last_run.txt"  # NEW: Tracks the last successful execution
+LAST_RUN_FILE = "last_run.txt"
 EMAIL_HOUR = 8
-TEST_MODE = False
-MODEL_NAME = "openrouter/free"
-MAX_CATCHUP_MINUTES = 1440  # Don't try to fetch more than 24 hours at once
+TEST_MODE = True
+MODEL_NAME = "nvidia/nemotron-3-ultra-550b-a55b:free"
+MAX_CATCHUP_MINUTES = 1440
 # ======================================================
 
 
@@ -116,7 +116,8 @@ async def run_daily_digest():
 
                 hourly_prompt = f"""
                 Briefly summarize these Telegram messages. 
-                Discard spam, ads, and junk. KEEP the [ID: link] and [media attach] tags intact so the daily summarizer has them.
+                Discard spam, ads, and junk entirely. 
+                CRITICAL: You MUST keep the exact [ID: https://...] and [media attach] tags attached to their respective summaries. Do not mix them up.
                 
                 MESSAGES:
                 {combined_hourly}
@@ -218,12 +219,13 @@ async def run_daily_digest():
                                     <!-- APPLY RTL HERE IF PERSIAN: Use dir="rtl" style="text-align: right;" -->
                                     <!-- APPLY LTR HERE IF ENGLISH: Use dir="ltr" style="text-align: left;" -->
                                     <div dir="ltr" style="color: #e6edf3; margin-top: 4px; font-size: 15px; line-height: 1.8; text-align: left;">
-                                        [Insert the dynamically translated or original text here]
+                                        [Insert the summary text here]
                                     </div>
                                     
                                     <!-- Tags and links ALWAYS stay on the left (LTR) -->
                                     <div style="margin-top: 12px; direction: ltr; text-align: left;">
                                         <span style="display: inline-block; background: #21262d; border: 1px solid #30363d; color: #8b949e; font-size: 12px; padding: 2px 8px; border-radius: 12px; margin-right: 10px;">📎 Media attached</span>
+                                        <!-- CRITICAL: Inject the raw [https://t.me/](https://t.me/)... link directly into the href below -->
                                         <a href="[https://t.me/](https://t.me/)..." style="color: #58a6ff; text-decoration: none; font-weight: bold; font-size: 13px;">View Post &rarr;</a>
                                     </div>
                                 </li>

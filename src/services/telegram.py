@@ -35,7 +35,7 @@ class TelegramService:
     async def get_recent_messages(
         self, channel_username: str, minutes: int = 60
     ) -> list[str]:
-        """Fetches messages with links, media tags, and first-line truncation over the last X minutes."""
+        """Fetches messages with links, media tags, and truncated content over the last X minutes."""
         await self.connect()
         cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
         messages = []
@@ -49,14 +49,11 @@ class TelegramService:
             if message.text or message.media:
                 msg_text = message.text or message.message or "[Media-only post]"
 
-                # Token Saver: Grab first line or first 150 characters
-                first_line = msg_text.split("\n")[0].strip()
-                if len(first_line) > 150:
-                    first_line = first_line[:150] + "..."
-                elif len(msg_text) > len(first_line):
-                    first_line += "..."
+                formatted_text = msg_text.strip()
+                if len(formatted_text) > 600:
+                    formatted_text = formatted_text[:600] + "... [TRUNCATED]"
 
-                msg_link = f"[https://t.me/](https://t.me/){clean_name}/{message.id}"
+                msg_link = f"https://t.me/{clean_name}/{message.id}"
 
                 media_tag = ""
                 if message.photo:
@@ -66,7 +63,7 @@ class TelegramService:
                 elif message.document:
                     media_tag = " [media attach: document]"
 
-                formatted_message = f"[ID: {msg_link}]{media_tag}\n{first_line}"
+                formatted_message = f"[ID: {msg_link}]{media_tag}\n{formatted_text}"
                 messages.append(formatted_message)
 
         messages.reverse()
