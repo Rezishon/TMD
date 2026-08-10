@@ -32,11 +32,31 @@ ai_client = OpenAI(
 
 CACHE_FILE = "daily_cache.txt"
 LAST_RUN_FILE = "last_run.txt"
+RETRY_FILE = "digest_retry.txt"
 EMAIL_HOUR = 8
 TEST_MODE = True
 MODEL_NAME = "nvidia/nemotron-3-ultra-550b-a55b:free"
 MAX_CATCHUP_MINUTES = 1440
 # ======================================================
+
+
+def get_response_content(response) -> str:
+    """Return model content or fail the run so the scheduler can retry it."""
+    if not response.choices or not response.choices[0].message:
+        raise RuntimeError("OpenRouter returned no message content")
+    content = response.choices[0].message.content
+    if not content:
+        raise RuntimeError("OpenRouter returned empty message content")
+    return content
+
+
+def ensure_email_sent(result: str) -> None:
+    if not result or not result.startswith("Email sent successfully"):
+        raise RuntimeError(f"Email delivery failed: {result}")
+
+
+def should_send_digest(now: datetime, email_hour: int, test_mode: bool, retry_file: str) -> bool:
+    return test_mode or now.hour == email_hour or os.path.exists(retry_file)
 
 
 def get_dynamic_fetch_minutes(now: datetime) -> int:
@@ -153,7 +173,7 @@ async def run_daily_digest():
             # ==========================================
             # STEP 3: AT 8 AM, DO THE MASTER DIGEST
             # ==========================================
-            should_send = TEST_MODE or (now.hour == EMAIL_HOUR)
+            should_send = should_send_digest(now, EMAIL_HOUR, TEST_MODE, RETRY_FILE)
 
             if should_send:
                 logger.info("⏰ Triggering summary generation and email delivery...")
@@ -259,7 +279,7 @@ async def run_daily_digest():
                     model=MODEL_NAME,
                     messages=[{"role": "user", "content": master_prompt}],
                 )
-                summary = response.choices[0].message.content
+                summary = get_response_content(response)
                 summary = summary.replace("```html", "").replace("```", "").strip()
 
                 logger.info("📧 Sending email digest...")
@@ -273,6 +293,7 @@ async def run_daily_digest():
                     },
                 )
                 logger.info(f"Result: {result}")
+                ensure_email_sent(str(result))
 
                 if not TEST_MODE:
                     os.remove(CACHE_FILE)
@@ -281,10 +302,16 @@ async def run_daily_digest():
                     logger.info(
                         "🧪 Test run complete! Cache preserved in daily_cache.txt for review."
                     )
+                if os.path.exists(RETRY_FILE):
+                    os.remove(RETRY_FILE)
+                    logger.info("✅ Cleared pending digest retry marker.")
 
     except Exception as e:
         error_details = traceback.format_exc()
         logger.error(f"❌ CRITICAL AGENT CRASH:\n{error_details}")
+        with open(RETRY_FILE, "w") as f:
+            f.write(datetime.now().isoformat())
+        logger.info("🔁 Digest marked for retry on the next hourly run.")
 
         if not TEST_MODE:
             logger.info("⚠️ Sending emergency error email via direct fallback...")
