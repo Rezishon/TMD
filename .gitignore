@@ -6,3 +6,4 @@ daily_cache.txt
 __pycache__/
 .venv/
 last_run.txt
+digest_retry.txt
