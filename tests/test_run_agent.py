@@ -2,7 +2,6 @@ import os
 import unittest
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import patch
 
 
 os.environ.update(
@@ -25,9 +24,8 @@ class RunAgentTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             get_response_content(response)
 
-    def test_retry_marker_sends_on_the_next_hour(self):
-        with patch("os.path.exists", return_value=True):
-            self.assertTrue(should_send_digest(datetime(2026, 8, 10, 7), 8, False, "retry"))
+    def test_digest_does_not_send_before_delivery_hour(self):
+        self.assertFalse(should_send_digest(datetime(2026, 8, 10, 7), 8))
 
     def test_email_failure_result_is_retryable(self):
         with self.assertRaises(RuntimeError):
