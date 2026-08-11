@@ -51,7 +51,7 @@ def get_response_content(response) -> str:
 
 
 def ensure_email_sent(result: str) -> None:
-    if not result or not result.startswith("Email sent successfully"):
+    if not result or "Email sent successfully" not in str(result):
         raise RuntimeError(f"Email delivery failed: {result}")
 
 
@@ -146,25 +146,30 @@ async def run_daily_digest():
                 {combined_hourly}
                 """
 
-                hourly_res = ai_client.chat.completions.create(
-                    model=MODEL_NAME,
-                    messages=[{"role": "user", "content": hourly_prompt}],
-                )
+                try:
+                    hourly_res = ai_client.chat.completions.create(
+                        model=MODEL_NAME,
+                        messages=[{"role": "user", "content": hourly_prompt}],
+                    )
 
-                if (
-                    hourly_res.choices
-                    and len(hourly_res.choices) > 0
-                    and hourly_res.choices[0].message
-                    and hourly_res.choices[0].message.content
-                ):
-                    content = hourly_res.choices[0].message.content
-                    with open(CACHE_FILE, "a", encoding="utf-8") as f:
-                        f.write(f"\n\n--- HOUR: {now.strftime('%H:%M')} ---\n")
-                        f.write(content)
-                    logger.info("✅ Hourly digest saved to cache.")
-                else:
+                    if (
+                        hourly_res.choices
+                        and len(hourly_res.choices) > 0
+                        and hourly_res.choices[0].message
+                        and hourly_res.choices[0].message.content
+                    ):
+                        content = hourly_res.choices[0].message.content
+                        with open(CACHE_FILE, "a", encoding="utf-8") as f:
+                            f.write(f"\n\n--- HOUR: {now.strftime('%H:%M')} ---\n")
+                            f.write(content)
+                        logger.info("✅ Hourly digest saved to cache.")
+                    else:
+                        logger.warning(
+                            "⚠️ OpenRouter returned 200 OK, but choices/content was empty. Skipping cache for this run."
+                        )
+                except Exception as api_err:
                     logger.warning(
-                        "⚠️ OpenRouter returned 200 OK, but choices/content was empty. Skipping cache for this run."
+                        f"⚠️ OpenRouter API Error during hourly summary: {api_err}. Skipping cache for this hour."
                     )
             else:
                 logger.info("💤 No new messages in this interval.")
