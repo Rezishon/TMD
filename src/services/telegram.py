@@ -11,11 +11,11 @@ class TelegramService:
             settings.telegram_api_hash,
         )
 
-    async def connect(self):
+    async def connect(self) -> None:
         if not self.client.is_connected():
             await self.client.start()
 
-    async def disconnect(self):
+    async def disconnect(self) -> None:
         if self.client.is_connected():
             await self.client.disconnect()
 
@@ -42,7 +42,7 @@ class TelegramService:
 
         clean_name = channel_username.lstrip("@")
 
-        async for message in self.client.iter_messages(channel_username, limit=100):
+        async for message in self.client.iter_messages(channel_username, limit=None):
             if message.date < cutoff:
                 break
 
