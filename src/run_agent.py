@@ -1,11 +1,12 @@
 import asyncio
-import os
+import fcntl
 import sys
 import json
 import logging
 import traceback
 from datetime import datetime
-from typing import List
+from pathlib import Path
+from typing import Any, TypedDict, cast
 
 from fastmcp import Client
 from fastmcp.client.transports import StdioTransport
@@ -34,28 +35,122 @@ ai_client = AsyncOpenAI(
     api_key=settings.openrouter_api_key, base_url="https://openrouter.ai/api/v1"
 )
 
-CACHE_FILE = "daily_cache.json"
-LAST_RUN_FILE = "last_run.txt"
-RETRY_FILE = "digest_retry.txt"
-EMAIL_HOUR = 8
-TEST_MODE = True
+CACHE_FILE = Path("daily_cache.json")
+LAST_RUN_FILE = Path("last_run.txt")
+DELIVERY_STATE_FILE = Path("delivery_state.json")
+UNCERTAIN_FILE = Path("uncertain_delivery.json")
+EMAIL_HOUR = settings.email_hour
 MODEL_NAME = "nvidia/nemotron-3-ultra-550b-a55b:free"
 MAX_CATCHUP_MINUTES = 1440
+MAX_DIGEST_CHARS = 80_000
 
 # ======================================================
 # UTILITY AND CACHE FUNCTIONS
 # ======================================================
 
 
+class CacheEntry(TypedDict):
+    timestamp: str
+    time_label: str
+    content: str
+
+
+def write_text_atomic(path: Path, content: str) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(content, encoding="utf-8")
+    temporary.replace(path)
+
+
+def load_cache() -> list[CacheEntry]:
+    if not CACHE_FILE.exists():
+        return []
+    data = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
+    if not isinstance(data, list) or any(
+        not isinstance(item, dict)
+        or not all(isinstance(item.get(key), str) for key in CacheEntry.__annotations__)
+        for item in data
+    ):
+        raise ValueError("Cache must be a JSON list of timestamped text entries")
+    return cast(list[CacheEntry], data)
+
+
+def write_cache(entries: list[CacheEntry], path: Path | None = None) -> None:
+    path = path or CACHE_FILE
+    if entries:
+        write_text_atomic(path, json.dumps(entries, indent=2, ensure_ascii=False))
+    else:
+        path.unlink(missing_ok=True)
+
+
+def format_cache(entries: list[CacheEntry]) -> str:
+    return "\n\n".join(
+        f"--- HOUR: {item['time_label']} ---\n{item['content']}" for item in entries
+    )
+
+
+def load_delivery_state() -> dict[str, Any]:
+    try:
+        state = json.loads(DELIVERY_STATE_FILE.read_text(encoding="utf-8"))
+        return state if isinstance(state, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def reconcile_delivery() -> None:
+    state = load_delivery_state()
+    entry_ids = state.get("entry_timestamps", [])
+    if not isinstance(entry_ids, list) or not entry_ids:
+        return
+
+    entries = load_cache()
+    batch = [entry for entry in entries if entry["timestamp"] in entry_ids]
+    remaining = [entry for entry in entries if entry["timestamp"] not in entry_ids]
+    if state.get("status") == "attempting" and batch:
+        quarantine_entries(batch)
+        state["status"] = "uncertain"
+
+    write_cache(remaining)
+    state["entry_timestamps"] = []
+    write_text_atomic(DELIVERY_STATE_FILE, json.dumps(state))
+
+
+def quarantine_entries(entries: list[CacheEntry]) -> None:
+    uncertain: list[CacheEntry] = []
+    if UNCERTAIN_FILE.exists():
+        uncertain = cast(
+            list[CacheEntry], json.loads(UNCERTAIN_FILE.read_text(encoding="utf-8"))
+        )
+    known = {entry["timestamp"] for entry in uncertain}
+    write_cache(
+        uncertain + [entry for entry in entries if entry["timestamp"] not in known],
+        UNCERTAIN_FILE,
+    )
+
+
+def select_digest_batch(entries: list[CacheEntry]) -> list[CacheEntry]:
+    batch: list[CacheEntry] = []
+    size = 0
+    for entry in entries:
+        entry_size = len(format_cache([entry])) + (2 if batch else 0)
+        if size + entry_size > MAX_DIGEST_CHARS:
+            break
+        batch.append(entry)
+        size += entry_size
+    if entries and not batch:
+        raise ValueError("A single cache entry exceeds the digest input limit")
+    return batch
+
+
 def get_dynamic_fetch_minutes(now: datetime) -> int:
     """Calculates how many minutes to fetch based on the last successful run."""
-    if os.path.exists(LAST_RUN_FILE):
+    if LAST_RUN_FILE.exists():
         try:
-            with open(LAST_RUN_FILE, "r") as f:
-                last_run_time = datetime.fromisoformat(f.read().strip())
+            last_run_time = datetime.fromisoformat(
+                LAST_RUN_FILE.read_text(encoding="utf-8").strip()
+            )
 
             delta_minutes = int((now - last_run_time).total_seconds() / 60) + 5
-            fetch_mins = min(delta_minutes, MAX_CATCHUP_MINUTES)
+            fetch_mins = max(1, min(delta_minutes, MAX_CATCHUP_MINUTES))
             logger.info(
                 f"⏱️ Found last run at {last_run_time.strftime('%H:%M')}. Auto-fetching {fetch_mins} minutes."
             )
@@ -71,16 +166,7 @@ def get_dynamic_fetch_minutes(now: datetime) -> int:
 
 def append_to_json_cache(now: datetime, content: str) -> None:
     """Safely appends hourly summaries to a structured JSON file."""
-    cache_data = []
-    if os.path.exists(CACHE_FILE):
-        try:
-            with open(CACHE_FILE, "r", encoding="utf-8") as f:
-                cache_data = json.load(f)
-        except json.JSONDecodeError:
-            logger.warning(
-                "⚠️ Cache file corrupted or empty. Starting fresh JSON array."
-            )
-
+    cache_data = load_cache()
     cache_data.append(
         {
             "timestamp": now.isoformat(),
@@ -89,33 +175,32 @@ def append_to_json_cache(now: datetime, content: str) -> None:
         }
     )
 
-    with open(CACHE_FILE, "w", encoding="utf-8") as f:
-        json.dump(cache_data, f, indent=4, ensure_ascii=False)
+    write_cache(cache_data)
     logger.info("✅ Hourly digest safely saved to JSON cache.")
-
-
-def read_and_format_cache() -> str:
-    """Reads JSON cache and returns a formatted string for the LLM."""
-    if not os.path.exists(CACHE_FILE):
-        return ""
-    try:
-        with open(CACHE_FILE, "r", encoding="utf-8") as f:
-            cache_data = json.load(f)
-        return "\n\n".join(
-            [
-                f"--- HOUR: {item['time_label']} ---\n{item['content']}"
-                for item in cache_data
-            ]
-        )
-    except Exception as e:
-        logger.error(f"❌ Failed to read JSON cache: {e}")
-        return ""
 
 
 def ensure_email_sent(result: str) -> None:
     """STRICT VALIDATION: Ensures email success before cache deletion proceeds."""
     if not result or "Email sent successfully" not in str(result):
         raise RuntimeError(f"Email delivery failed: {result}")
+
+
+def get_response_content(response: Any) -> str:
+    try:
+        content = response.choices[0].message.content
+    except (AttributeError, IndexError, TypeError) as error:
+        raise RuntimeError("OpenRouter returned no message content") from error
+    if not content or not content.strip():
+        raise RuntimeError("OpenRouter returned empty message content")
+    return content.strip()
+
+
+def delivered_today(now: datetime) -> bool:
+    return load_delivery_state().get("date") == now.date().isoformat()
+
+
+def should_send_digest(now: datetime, email_hour: int = EMAIL_HOUR) -> bool:
+    return not delivered_today(now) and now.hour >= email_hour
 
 
 # ======================================================
@@ -125,10 +210,11 @@ def ensure_email_sent(result: str) -> None:
 
 async def process_hourly_fetch(
     mcp_client: Client, fetch_minutes: int, now: datetime
-) -> None:
+) -> bool:
     """Handles fetching Telegram messages and summarizing them hourly."""
     channels = [c.strip() for c in settings.target_channels.split(",") if c.strip()]
-    recent_texts: List[str] = []
+    recent_texts: list[str] = []
+    all_channels_fetched = True
 
     for channel in channels:
         logger.info(f"📥 Fetching updates for {channel} (last {fetch_minutes} mins)...")
@@ -138,16 +224,20 @@ async def process_hourly_fetch(
                 {"channel_username": channel, "minutes": fetch_minutes},
             )
             raw_text = str(messages_result)
-            if "No text messages found" not in raw_text and "Error" not in raw_text:
+            if "No text messages found" not in raw_text:
                 recent_texts.append(f"=== {channel} ===\n{raw_text}")
             else:
                 logger.info(f"Skipping {channel}: No messages.")
         except Exception as e:
+            all_channels_fetched = False
             logger.error(f"❌ Failed to fetch {channel}: {e}")
 
     if not recent_texts:
         logger.info("💤 No new messages in this interval.")
-        return
+        return all_channels_fetched
+    if not all_channels_fetched:
+        logger.warning("Discarding partial fetch; all channels will retry next run.")
+        return False
 
     logger.info("🧠 Creating hourly mini-digest...")
     combined_hourly = "\n\n".join(recent_texts)
@@ -167,32 +257,50 @@ async def process_hourly_fetch(
         hourly_res = await ai_client.chat.completions.create(
             model=MODEL_NAME,
             messages=[{"role": "user", "content": hourly_prompt}],
+            max_tokens=4000,
         )
 
-        if (
-            hourly_res.choices
-            and len(hourly_res.choices) > 0
-            and hourly_res.choices[0].message
-            and hourly_res.choices[0].message.content
-        ):
-            content = hourly_res.choices[0].message.content.strip()
-            append_to_json_cache(now, content)
-        else:
-            logger.warning("⚠️ OpenRouter returned empty content. Skipping cache write.")
+        append_to_json_cache(now, get_response_content(hourly_res))
+        return all_channels_fetched
     except Exception as api_err:
         logger.warning(
             f"⚠️ OpenRouter API Error during hourly summary: {api_err}. Skipping cache for this hour."
         )
+        return False
 
 
-async def process_master_digest(mcp_client: Client) -> None:
+async def process_master_digest(
+    mcp_client: Client, now: datetime | None = None
+) -> None:
     """Handles reading the cache, generating the master HTML digest, and emailing it."""
     logger.info("⏰ Triggering summary generation and email delivery...")
 
-    full_data = read_and_format_cache()
-    if not full_data:
+    cache_entries = load_cache()
+    oversized = [
+        entry
+        for entry in cache_entries
+        if len(format_cache([entry])) > MAX_DIGEST_CHARS
+    ]
+    if oversized:
+        quarantine_entries(oversized)
+        oversized_ids = {entry["timestamp"] for entry in oversized}
+        cache_entries = [
+            entry for entry in cache_entries if entry["timestamp"] not in oversized_ids
+        ]
+        write_cache(cache_entries)
+        logger.error("Quarantined %d oversized cache entry(s).", len(oversized))
+    batch = select_digest_batch(cache_entries)
+    if not batch:
         logger.warning("No cache found or cache is empty. Nothing to summarize.")
         return
+    full_data = format_cache(batch)
+
+    now = now or datetime.now()
+    recipients = EmailService.validate_config()
+    logger.info(
+        "✅ Delivery preflight passed: cache readable, SMTP configured, %d recipient(s).",
+        len(recipients),
+    )
 
     logger.info("🧠 Summarizing cached data into HTML with OpenRouter...")
 
@@ -266,7 +374,7 @@ async def process_master_digest(mcp_client: Client) -> None:
                         <div style="margin-top: 12px; direction: ltr; text-align: left;">
                             <span style="display: inline-block; background: #21262d; border: 1px solid #30363d; color: #8b949e; font-size: 12px; padding: 2px 8px; border-radius: 12px; margin-right: 10px;">📎 Media attached</span>
                             <!-- CRITICAL: Inject the raw [https://t.me/](https://t.me/)... link directly into the href below -->
-                            <a href="[https://t.me/](https://t.me/)..." style="color: #58a6ff; text-decoration: none; font-weight: bold; font-size: 13px;">View Post &rarr;</a>
+                            <a href="https://t.me/..." style="color: #58a6ff; text-decoration: none; font-weight: bold; font-size: 14px;">View Post &rarr;</a>
                         </div>
                     </li>
                 </ul>
@@ -281,7 +389,7 @@ async def process_master_digest(mcp_client: Client) -> None:
     </html>
 
     MESSAGES (24 Hourly Summaries):
-    {full_data[:80000]}
+    {full_data}
     """
 
     # PERFORMANCE: Await the async client network call
@@ -290,38 +398,30 @@ async def process_master_digest(mcp_client: Client) -> None:
         messages=[{"role": "user", "content": master_prompt}],
     )
 
-    if not response.choices or not response.choices[0].message.content:
-        raise RuntimeError(
-            "OpenRouter returned empty message content for master digest"
-        )
-
-    summary = response.choices[0].message.content
+    summary = get_response_content(response)
     summary = summary.replace("```html", "").replace("```", "").strip()
 
     logger.info("📧 Sending email digest...")
+    state = {
+        "date": now.date().isoformat(),
+        "status": "attempting",
+        "entry_timestamps": [entry["timestamp"] for entry in batch],
+    }
+    write_text_atomic(DELIVERY_STATE_FILE, json.dumps(state))
     result = await mcp_client.call_tool(
         "send_summary_email",
-        {
-            "subject": "Tech & News Digest (Test Run)"
-            if TEST_MODE
-            else "Daily Tech & News Digest",
-            "content": summary,
-        },
+        {"subject": "Daily Tech & News Digest", "content": summary},
     )
+    result_text = str(result)
+    if "NOT_SENT:" in result_text:
+        DELIVERY_STATE_FILE.unlink(missing_ok=True)
+    ensure_email_sent(result_text)
+
     logger.info(f"Result: {result}")
-
-    # DATA FLOW: If ensure_email_sent fails, execution aborts here. Cache is completely safe.
-    ensure_email_sent(str(result))
-
-    if not TEST_MODE:
-        os.remove(CACHE_FILE)
-        logger.info("🗑️ Production run complete. JSON Cache cleared.")
-    else:
-        logger.info("🧪 Test run complete! JSON Cache preserved for review.")
-
-    if os.path.exists(RETRY_FILE):
-        os.remove(RETRY_FILE)
-        logger.info("✅ Cleared pending digest retry marker.")
+    state["status"] = "sent"
+    write_text_atomic(DELIVERY_STATE_FILE, json.dumps(state))
+    reconcile_delivery()
+    logger.info("🗑️ Delivery complete. Sent cache batch cleared.")
 
 
 # ======================================================
@@ -334,58 +434,43 @@ async def run_daily_digest() -> None:
     fetch_minutes = get_dynamic_fetch_minutes(now)
 
     logger.info(
-        f"🤖 Agent waking up at {now.strftime('%H:%M:%S')} (TEST_MODE={TEST_MODE}, FETCH_MINUTES={fetch_minutes})..."
+        f"🤖 Agent waking up at {now.strftime('%H:%M:%S')} (FETCH_MINUTES={fetch_minutes})..."
     )
 
     try:
-        if TEST_MODE and os.path.exists(CACHE_FILE):
-            os.remove(CACHE_FILE)
-            logger.info("🗑️ TEST_MODE active: Cleared old JSON cache before starting.")
-
+        reconcile_delivery()
         transport = StdioTransport(command=sys.executable, args=["-m", "src.server"])
 
         async with Client(transport) as mcp_client:
-            await process_hourly_fetch(mcp_client, fetch_minutes, now)
-
-            with open(LAST_RUN_FILE, "w") as f:
-                f.write(now.isoformat())
+            fetch_succeeded = await process_hourly_fetch(mcp_client, fetch_minutes, now)
+            if fetch_succeeded:
+                write_text_atomic(LAST_RUN_FILE, now.isoformat())
+            else:
+                logger.warning(
+                    "Fetch state preserved so failed messages can be retried."
+                )
 
             # Step 3: Check if Master Digest should run
-            should_send = (
-                TEST_MODE or now.hour == EMAIL_HOUR or os.path.exists(RETRY_FILE)
-            )
-            if should_send:
-                await process_master_digest(mcp_client)
+            if should_send_digest(now):
+                await process_master_digest(mcp_client, now)
 
     except Exception as e:
         error_details = traceback.format_exc()
         logger.error(f"❌ CRITICAL AGENT CRASH:\n{error_details}")
 
-        with open(RETRY_FILE, "w") as f:
-            f.write(datetime.now().isoformat())
-        logger.info("🔁 Digest marked for retry on the next hourly run.")
-
-        if not TEST_MODE:
-            logger.info("⚠️ Sending emergency error email via direct fallback...")
-            error_html = f"""
-            <html>
-                <body style="font-family: monospace; background-color: #ffe6e6; padding: 20px;">
-                    <h2 style="color: #c0392b;">🚨 Telegram Agent Crash Alert</h2>
-                    <p>Your VPS agent encountered a critical error at {now.strftime("%H:%M:%S")}.</p>
-                    <div style="background: #fff; padding: 15px; border-left: 5px solid #e74c3c; overflow-x: auto;">
-                        <pre style="color: #333;">{error_details}</pre>
-                    </div>
-                </body>
-            </html>
-            """
-            success, msg = EmailService.send_report(
-                subject="🚨 Agent Crash Alert", content=error_html
+        if not delivered_today(now):
+            logger.info("🔁 Delivery remains pending for the next hourly run.")
+        else:
+            logger.error(
+                "Delivery outcome is uncertain; cache preserved and automatic resend disabled."
             )
-            if success:
-                logger.info("✅ Error email sent successfully.")
-            else:
-                logger.error(f"❌ Failed to send error email: {msg}")
+        raise
 
 
 if __name__ == "__main__":
-    asyncio.run(run_daily_digest())
+    with open(".agent.lock", "w") as lock_file:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            asyncio.run(run_daily_digest())
+        except BlockingIOError:
+            logger.warning("Another agent run is still active; skipping this run.")

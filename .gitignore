@@ -3,7 +3,10 @@
 *.session-journal
 *.log
 daily_cache.txt
+daily_cache.json
 __pycache__/
 .venv/
 last_run.txt
-digest_retry.txt
+delivery_state.json
+uncertain_delivery.json
+.agent.lock
