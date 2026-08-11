@@ -1,4 +1,3 @@
-from typing import Optional
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 
@@ -9,12 +8,14 @@ class Settings(BaseSettings):
     telegram_session_name: str = "telegram_agent"
 
     smtp_server: str = "smtp.gmail.com"
-    smtp_port: int = 587
+    smtp_port: int = Field(587, ge=1, le=65535)
+    smtp_timeout: int = Field(30, gt=0)
     email_sender: str = Field(..., description="Your sending email")
     email_password: str = Field(..., description="Your 16-char app password")
     email_receiver: str = Field(..., description="Where to send the report")
 
     openrouter_api_key: str = Field(..., description="Your OpenRouter API Key")
+    email_hour: int = Field(8, ge=0, le=23)
 
     target_channels: str = Field(
         ..., description="Comma-separated list of channels to read"

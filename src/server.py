@@ -30,14 +30,10 @@ async def fetch_channel_updates(channel_username: str, minutes: int = 60) -> str
     Fetches the text messages from a Telegram channel for the past X minutes.
     Use this to read the news or updates from the user's subscribed channels so you can summarize them.
     """
-    try:
-        messages = await telegram_service.get_recent_messages(channel_username, minutes)
-        if not messages:
-            return f"No text messages found in {channel_username} over the last {minutes} minutes."
-
-        return "\n\n---\n\n".join(messages)
-    except Exception as e:
-        return f"Error fetching messages from {channel_username}: {str(e)}"
+    messages = await telegram_service.get_recent_messages(channel_username, minutes)
+    if not messages:
+        return f"No text messages found in {channel_username} over the last {minutes} minutes."
+    return "\n\n---\n\n".join(messages)
 
 
 @mcp.tool()
