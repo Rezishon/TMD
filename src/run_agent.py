@@ -39,6 +39,7 @@ CACHE_FILE = Path("daily_cache.json")
 LAST_RUN_FILE = Path("last_run.txt")
 DELIVERY_STATE_FILE = Path("delivery_state.json")
 UNCERTAIN_FILE = Path("uncertain_delivery.json")
+DRY_RUN_OUTPUT = Path("digest_preview.html")
 EMAIL_HOUR = settings.email_hour
 MODEL_NAME = "nvidia/nemotron-3-ultra-550b-a55b:free"
 MAX_CATCHUP_MINUTES = 1440
@@ -296,11 +297,12 @@ async def process_master_digest(
     full_data = format_cache(batch)
 
     now = now or datetime.now()
-    recipients = EmailService.validate_config()
-    logger.info(
-        "✅ Delivery preflight passed: cache readable, SMTP configured, %d recipient(s).",
-        len(recipients),
-    )
+    if not settings.dry_run:
+        recipients = EmailService.validate_config()
+        logger.info(
+            "✅ Delivery preflight passed: cache readable, SMTP configured, %d recipient(s).",
+            len(recipients),
+        )
 
     logger.info("🧠 Summarizing cached data into HTML with OpenRouter...")
 
@@ -400,6 +402,11 @@ async def process_master_digest(
 
     summary = get_response_content(response)
     summary = summary.replace("```html", "").replace("```", "").strip()
+
+    if settings.dry_run:
+        write_text_atomic(DRY_RUN_OUTPUT, summary)
+        logger.info("🧪 Dry run complete. Preview written to %s.", DRY_RUN_OUTPUT)
+        return
 
     logger.info("📧 Sending email digest...")
     state = {

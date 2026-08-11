@@ -9,4 +9,5 @@ __pycache__/
 last_run.txt
 delivery_state.json
 uncertain_delivery.json
+digest_preview.html
 .agent.lock

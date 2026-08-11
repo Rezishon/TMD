@@ -16,6 +16,7 @@ class Settings(BaseSettings):
 
     openrouter_api_key: str = Field(..., description="Your OpenRouter API Key")
     email_hour: int = Field(8, ge=0, le=23)
+    dry_run: bool = False
 
     target_channels: str = Field(
         ..., description="Comma-separated list of channels to read"
