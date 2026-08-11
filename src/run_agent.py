@@ -55,7 +55,9 @@ def ensure_email_sent(result: str) -> None:
         raise RuntimeError(f"Email delivery failed: {result}")
 
 
-def should_send_digest(now: datetime, email_hour: int, test_mode: bool, retry_file: str) -> bool:
+def should_send_digest(
+    now: datetime, email_hour: int, test_mode: bool, retry_file: str
+) -> bool:
     return test_mode or now.hour == email_hour or os.path.exists(retry_file)
 
 
@@ -136,6 +138,7 @@ async def run_daily_digest():
 
                 hourly_prompt = f"""
                 Briefly summarize these Telegram messages. 
+                Summarize briefly, preserve each message’s original language, keep the main idea and remove spam.
                 Discard spam, ads, and junk entirely. 
                 CRITICAL: You MUST keep the exact [ID: https://...] and [media attach] tags attached to their respective summaries. Do not mix them up.
                 
